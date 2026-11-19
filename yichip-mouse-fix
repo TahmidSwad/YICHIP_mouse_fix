@@ -1,0 +1,181 @@
+#!/usr/bin/bash
+# Recover the YICHIP 3151:3020 wireless receiver's mouse HID interface.
+#
+# The mouse interface (HID protocol 2) sometimes fails its first usbhid probe
+# with -110 (ETIMEDOUT). Rebinding only that interface repeats the same failing
+# probe. This script resets/re-enumerates the whole receiver so both HID
+# interfaces are probed again from a clean state.
+
+set -uo pipefail
+
+VENDOR="3151"
+PRODUCT="3020"
+MAX_ATTEMPTS="${MAX_ATTEMPTS:-5}"
+INITIAL_DELAY="${INITIAL_DELAY:-3}"
+MAX_DELAY="${MAX_DELAY:-30}"
+STARTUP_GRACE="${STARTUP_GRACE:-30}"
+DRY_RUN="${DRY_RUN:-0}"
+
+log() {
+    printf '%s\n' "$*"
+}
+
+find_device() {
+    local dev
+    for dev in /sys/bus/usb/devices/*; do
+        [ -r "$dev/idVendor" ] || continue
+        [ -r "$dev/idProduct" ] || continue
+        [ "$(cat "$dev/idVendor" 2>/dev/null)" = "$VENDOR" ] || continue
+        [ "$(cat "$dev/idProduct" 2>/dev/null)" = "$PRODUCT" ] || continue
+        printf '%s\n' "$dev"
+        return 0
+    done
+    return 1
+}
+
+find_mouse_interface() {
+    local dev="$1" intf
+    for intf in "$dev":*; do
+        [ -r "$intf/bInterfaceClass" ] || continue
+        [ -r "$intf/bInterfaceSubClass" ] || continue
+        [ -r "$intf/bInterfaceProtocol" ] || continue
+        [ "$(cat "$intf/bInterfaceClass" 2>/dev/null)" = "03" ] || continue
+        [ "$(cat "$intf/bInterfaceSubClass" 2>/dev/null)" = "01" ] || continue
+        [ "$(cat "$intf/bInterfaceProtocol" 2>/dev/null)" = "02" ] || continue
+        printf '%s\n' "$intf"
+        return 0
+    done
+    return 1
+}
+
+mouse_is_working() {
+    local dev="$1" intf hid input driver
+
+    intf=$(find_mouse_interface "$dev") || return 1
+
+    [ -L "$intf/driver" ] || return 1
+    driver=$(basename "$(readlink -f "$intf/driver" 2>/dev/null)" 2>/dev/null)
+    [ "$driver" = "usbhid" ] || return 1
+
+    for hid in "$intf"/0003:"$VENDOR":"$PRODUCT".*; do
+        [ -d "$hid" ] || continue
+        for input in "$hid"/input/input*; do
+            [ -d "$input" ] || continue
+            [ -e "$input/capabilities/rel" ] && return 0
+        done
+    done
+
+    # usbhid is bound but no relative-axis input node exists yet.
+    return 1
+}
+
+wait_for_mouse_ready() {
+    local i dev
+    # usbhid's failed probe can take ~26 seconds to time out. Wait long enough
+    # for a probe to finish before deciding another reset is needed.
+    for i in {1..240}; do
+        if dev=$(find_device); then
+            mouse_is_working "$dev" && return 0
+        fi
+        sleep 0.25
+    done
+    return 1
+}
+
+reset_device() {
+    local dev="$1" name
+    name=$(basename "$dev")
+
+    log "Resetting USB device $name"
+
+    if [ "$DRY_RUN" = "1" ]; then
+        return 0
+    fi
+
+    # Preferred method: deauthorize and reauthorize the USB device. This
+    # removes both HID interfaces and re-enumerates them from scratch.
+    if [ -w "$dev/authorized" ]; then
+        printf '0' > "$dev/authorized" 2>/dev/null || true
+        sleep 1
+        # Reauthorize, retrying briefly if the attribute is momentarily busy.
+        local i
+        for i in {1..20}; do
+            [ -e "$dev/authorized" ] || break
+            printf '1' > "$dev/authorized" 2>/dev/null && break
+            sleep 0.5
+        done
+    elif [ -w /sys/bus/usb/drivers/usb/unbind ] && [ -w /sys/bus/usb/drivers/usb/bind ]; then
+        # Fallback: unbind/rebind the whole USB device.
+        printf '%s' "$name" > /sys/bus/usb/drivers/usb/unbind 2>/dev/null || true
+        sleep 1
+        printf '%s' "$name" > /sys/bus/usb/drivers/usb/bind 2>/dev/null || true
+    else
+        log "No writable USB reset interface found."
+        return 1
+    fi
+
+    wait_for_mouse_ready || log "Timed out waiting for usbhid to probe the mouse interface."
+    return 0
+}
+
+main() {
+    local attempt=0 delay="$INITIAL_DELAY" dev=""
+
+    # Wait up to 30 seconds for the dongle to appear.
+    local i
+    for i in {1..60}; do
+        if dev=$(find_device); then
+            break
+        fi
+        sleep 0.5
+    done
+
+    if [ -z "$dev" ]; then
+        log "YICHIP $VENDOR:$PRODUCT device not found; nothing to do."
+        return 0
+    fi
+
+    # On boot the initial usbhid probe may still be running and can take ~26s
+    # to fail. Do not reset the device out from under that probe.
+    if ! mouse_is_working "$dev"; then
+        log "Mouse interface is not ready; waiting ${STARTUP_GRACE}s for the initial probe to settle."
+        sleep "$STARTUP_GRACE"
+    fi
+
+    while [ "$attempt" -lt "$MAX_ATTEMPTS" ]; do
+        if ! dev=$(find_device); then
+            log "Device is temporarily gone; waiting..."
+            sleep 2
+            attempt=$((attempt + 1))
+            continue
+        fi
+
+        if mouse_is_working "$dev"; then
+            log "YICHIP mouse interface is working."
+            return 0
+        fi
+
+        log "Attempt $((attempt + 1))/$MAX_ATTEMPTS: mouse interface is not working."
+        reset_device "$dev" || log "Reset command failed."
+
+        if dev=$(find_device) && mouse_is_working "$dev"; then
+            log "YICHIP mouse interface recovered."
+            return 0
+        fi
+
+        attempt=$((attempt + 1))
+        if [ "$attempt" -lt "$MAX_ATTEMPTS" ]; then
+            log "Retrying in ${delay}s..."
+            sleep "$delay"
+            delay=$((delay * 2))
+            [ "$delay" -gt "$MAX_DELAY" ] && delay="$MAX_DELAY"
+        fi
+    done
+
+    log "Could not recover the YICHIP mouse interface after $MAX_ATTEMPTS attempts."
+    return 1
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main "$@"
+fi

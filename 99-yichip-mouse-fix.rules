@@ -1,0 +1,6 @@
+# Keep the YICHIP receiver out of USB autosuspend.
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="3151", ATTR{idProduct}=="3020", ATTR{power/control}="on"
+
+# Start the recovery service on boot/hotplug. The service checks whether the
+# mouse interface actually came up and resets the receiver if it did not.
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="3151", ATTR{idProduct}=="3020", TAG+="systemd", ENV{SYSTEMD_WANTS}+="yichip-mouse-fix.service"

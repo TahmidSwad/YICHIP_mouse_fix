@@ -1,0 +1,12 @@
+[Unit]
+Description=Fix YICHIP 3151:3020 wireless mouse initialization
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/yichip-mouse-fix
+TimeoutStartSec=900
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
