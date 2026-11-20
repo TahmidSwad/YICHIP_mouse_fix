@@ -58,7 +58,7 @@ Other systemd-based distributions should work, but kernel behavior may differ.
 ## Install
 
 ```bash
-git clone [<repository-url>](https://github.com/TahmidSwad/YICHIP_mouse_fix)
+git clone https://github.com/TahmidSwad/YICHIP_mouse_fix
 cd yichip-mouse-fix
 sudo bash install.sh
 ```
